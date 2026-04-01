@@ -1,10 +1,10 @@
 const fetch = require('node-fetch');
 const cheerio = require('cheerio');
 
-// Настройки
-const CACHE_TTL = 10 * 60 * 1000; // 10 минут
+// Настройки кэширования
+const CACHE_TTL = 10 * 60 * 1000; 
 const POSTS_LIMIT = 5;
-const CACHE_VERSION = 'v26'; // Новая версия для сброса старого кэша
+const CACHE_VERSION = 'v27'; // Подняли версию для сброса старого кэша
 
 let cachedData = { data: null, timestamp: 0, version: CACHE_VERSION };
 
@@ -15,7 +15,6 @@ async function fetchWithTimeout(url, options = {}) {
     const { timeout = 12000 } = options;
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), timeout);
-
     try {
         const response = await fetch(url, { ...options, signal: controller.signal });
         clearTimeout(id);
@@ -27,32 +26,32 @@ async function fetchWithTimeout(url, options = {}) {
 }
 
 /**
- * Чистка контента от мусора RSSHub и лишних оберток Cheerio
+ * Глубокая очистка контента от мусора RSSHub
  */
 function sanitizeContent(html) {
     if (!html) return '';
     
-    // Загружаем фрагмент. fragment: true предотвращает добавление html/body
+    // КРИТИЧНО: флаг false отключает автоматическое добавление <html><body>
     const $ = cheerio.load(html, null, false);
     
-    // 1. Удаляем цитаты RSSHub ("загогулины") и служебную инфу
+    // Удаляем цитаты RSSHub ("загогулины") и служебные блоки
     $('.rsshub-quote, blockquote, .tgme_widget_message_author_name, .tgme_widget_message_forwarded_from').remove();
     
-    // 2. Удаляем пустые ссылки и параграфы, которые могут остаться после удаления цитат
+    // Удаляем пустые ссылки, которые остаются после вырезания цитат
     $('a').each((i, el) => {
         if ($(el).text().trim() === '' && $(el).find('img').length === 0) {
             $(el).remove();
         }
     });
 
-    // 3. Вытаскиваем результат
     let result = $.html().trim();
     
-    // 4. Финальная чистка от лишних переносов строк в начале и в конце
+    // Убираем лишние <br> в начале и конце, чтобы текст прилегал к краям
     return result.replace(/^(?:\s*<br\s*\/?>\s*)+|(?:\s*<br\s*\/?>\s*)+$/gi, '');
 }
 
 module.exports = async (req, res) => {
+    // Заголовки для кэширования на стороне Vercel Edge
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET');
     res.setHeader('Cache-Control', 's-maxage=600, stale-while-revalidate');
@@ -68,6 +67,7 @@ module.exports = async (req, res) => {
         cachedData = { data: null, timestamp: 0, version: CACHE_VERSION };
     }
 
+    // Проверка внутреннего кэша приложения
     if (cachedData.data && (now - cachedData.timestamp < CACHE_TTL)) {
         return res.status(200).json(cachedData.data.slice(offset, offset + limit));
     }
@@ -80,7 +80,7 @@ module.exports = async (req, res) => {
         }
         throw new Error('RSSHub empty');
     } catch (e) {
-        console.warn('RSSHub failed, trying Web fallback...', e.message);
+        console.warn('RSSHub failed, trying Web fallback...');
         try {
             const posts = await fetchFromTelegramWeb(channel);
             if (posts && posts.length > 0) {
@@ -92,7 +92,7 @@ module.exports = async (req, res) => {
         }
         
         if (cachedData.data) return res.status(200).json(cachedData.data.slice(offset, offset + limit));
-        return res.status(500).json({ error: 'Failed to fetch' });
+        return res.status(500).json({ error: 'Failed' });
     }
 };
 
@@ -110,12 +110,9 @@ async function fetchFromRSSHub(channel) {
         const link = $(el).find('link').text() || '';
         const pubDate = $(el).find('pubDate').text();
 
-        // Обрабатываем описание отдельно
-        const $desc = cheerio.load(description);
-        
-        // Сначала достаем картинку
+        // Обрабатываем описание отдельно, вырезая картинки в отдельное поле
+        const $desc = cheerio.load(description, null, false);
         let image = $desc('img').first().attr('src') || null;
-        // Удаляем все картинки из текста, чтобы они не дублировались в JSON
         $desc('img').remove();
 
         posts.push({
@@ -125,7 +122,7 @@ async function fetchFromRSSHub(channel) {
             date: Math.floor(new Date(pubDate).getTime() / 1000)
         });
     });
-    return posts.sort((a, b) => b.date - a.date);
+    return posts.sort((a, b) => b.date - a.date); // Сортировка по дате
 }
 
 async function fetchFromTelegramWeb(channel) {

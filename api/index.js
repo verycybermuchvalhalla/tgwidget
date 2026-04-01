@@ -1,30 +1,31 @@
 const fetch = require('node-fetch');
 const cheerio = require('cheerio');
 
-const CACHE_TTL = 5 * 60 * 1000; // 5 минут
+// Константы
+const CACHE_TTL = 5 * 60 * 1000; 
 const POSTS_LIMIT = 5;
-const CACHE_VERSION = 'v20'; // Новая версия для сброса старого кэша
+const CACHE_VERSION = 'v21'; // Подняли версию, чтобы сбросить старый "битый" кэш
 
 let cachedData = { data: null, timestamp: 0, version: CACHE_VERSION };
 
 /**
- * Чистка HTML от "загогулин" RSSHub и лишнего мусора
+ * Чистка контента от мусора RSSHub и Telegram Web
  */
-function cleanPostHTML(html, $) {
-    const $content = cheerio.load(html);
+function cleanContent(html) {
+    if (!html) return '';
+    const $ = cheerio.load(html);
     
-    // Удаляем блоки превью и цитат, которые сует RSSHub
-    $content('.rsshub-quote, blockquote, .tgme_widget_message_author_name').remove();
+    // Удаляем цитаты RSSHub и служебные блоки
+    $('.rsshub-quote, blockquote, .tgme_widget_message_author_name, .tgme_widget_message_forwarded_from').remove();
     
-    // Удаляем пустые ссылки и лишние переносы
-    $content('a').each((i, el) => {
-        if ($content(el).text().trim() === '' && $content(el).find('img').length === 0) {
-            $content(el).remove();
+    // Убираем пустые ссылки
+    $('a').each((i, el) => {
+        if ($(el).text().trim() === '' && $(el).find('img').length === 0) {
+            $(el).remove();
         }
     });
 
-    let clean = $content('body').html() || '';
-    return clean.replace(/^(?:\s*<br\s*\/?>\s*)+|(?:\s*<br\s*\/?>\s*)+$/gi, '').trim();
+    return $.html().trim();
 }
 
 async function fetchWithTimeout(url, options = {}) {
@@ -52,13 +53,17 @@ module.exports = async (req, res) => {
     if (!channel) return res.status(400).json({ error: 'No channel' });
 
     const now = Date.now();
-    if (cachedData.version !== CACHE_VERSION) cachedData = { data: null, timestamp: 0, version: CACHE_VERSION };
+    
+    // Сброс кэша при смене версии кода
+    if (cachedData.version !== CACHE_VERSION) {
+        cachedData = { data: null, timestamp: 0, version: CACHE_VERSION };
+    }
+
     if (cachedData.data && (now - cachedData.timestamp < CACHE_TTL)) {
         return res.status(200).json(cachedData.data.slice(offset, offset + limit));
     }
 
     try {
-        console.log('Trying RSSHub...');
         const posts = await fetchFromRSSHub(channel);
         if (posts && posts.length > 0) {
             cachedData = { data: posts, timestamp: now, version: CACHE_VERSION };
@@ -66,7 +71,7 @@ module.exports = async (req, res) => {
         }
         throw new Error('RSSHub empty');
     } catch (e) {
-        console.warn('RSSHub failed, trying Web fallback...');
+        console.warn('RSSHub failed, fallback to Web...');
         try {
             const posts = await fetchFromTelegramWeb(channel);
             if (posts && posts.length > 0) {
@@ -78,15 +83,18 @@ module.exports = async (req, res) => {
         }
         
         if (cachedData.data) return res.status(200).json(cachedData.data.slice(offset, offset + limit));
-        return res.status(500).json({ error: 'Failed to fetch' });
+        return res.status(500).json({ error: 'Failed' });
     }
 };
 
 async function fetchFromRSSHub(channel) {
-    const response = await fetchWithTimeout(`https://rsshub.app/telegram/channel/${channel}`, {
+    // Используем современный URL API вместо url.parse()
+    const targetUrl = new URL(`https://rsshub.app/telegram/channel/${channel}`);
+    const response = await fetchWithTimeout(targetUrl.href, {
         headers: { 'User-Agent': 'Mozilla/5.0' }
     });
-    if (!response.ok) throw new Error('RSSHub Down');
+    
+    if (!response.ok) throw new Error(`RSSHub status ${response.status}`);
     
     const text = await response.text();
     const $ = cheerio.load(text, { xmlMode: true });
@@ -98,22 +106,17 @@ async function fetchFromRSSHub(channel) {
         const pubDate = $(el).find('pubDate').text();
 
         const $temp = cheerio.load(description);
-        let image = $temp('img').first().attr('src') || null;
+        const image = $temp('img').first().attr('src') || null;
         
-        // Поиск YouTube
-        let embed = null;
-        const ytMatch = description.match(/https?:\/\/(www\.)?(youtube\.com|youtu\.be)\/[^\s<"]+/i);
-        if (ytMatch) embed = { type: 'youtube', link: ytMatch[0], title: 'YouTube' };
-
         posts.push({
-            id: link.split('/').pop() || i,
-            text: cleanPostHTML(description),
+            id: link.split('/').pop() || Date.now() + i,
+            text: cleanContent(description), // Чистим от "загогулин"
             image,
-            embed,
             date: Math.floor(new Date(pubDate).getTime() / 1000)
         });
     });
-    return posts.sort((a, b) => b.date - a.date);
+
+    return posts.sort((a, b) => b.date - a.date); // Сортировка по дате
 }
 
 async function fetchFromTelegramWeb(channel) {
@@ -141,7 +144,7 @@ async function fetchFromTelegramWeb(channel) {
         if (textHtml || image) {
             posts.push({
                 id: $el.attr('data-post') ? $el.attr('data-post').split('/').pop() : i,
-                text: cleanPostHTML(textHtml),
+                text: cleanContent(textHtml),
                 image,
                 date
             });

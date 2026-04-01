@@ -1,9 +1,12 @@
-// ✅ ПРАВИЛЬНО (скопируйте именно так):
-let cachedData = {
-   null,        // ← ← ← ключ "  " + двоеточие + пробел + null
-  timestamp: 0,
-  version: CACHE_VERSION
-};
+const fetch = require('node-fetch');
+const cheerio = require('cheerio');
+
+const CACHE_TTL = 10 * 60 * 1000;
+const POSTS_LIMIT = 5;
+const CACHE_VERSION = 'v15';
+
+// 🔥 ПРАВИЛЬНО: data: null (ключ + двоеточие + пробел + null)
+let cachedData = {  : null, timestamp: 0, version: CACHE_VERSION };
 
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -19,8 +22,10 @@ module.exports = async (req, res) => {
   if (!channel) return res.status(400).json({ error: 'No channel' });
 
   const now = Date.now();
+  
+  // 🔥 И здесь тоже:  :
   if (cachedData.version !== CACHE_VERSION) {
-    cachedData = {  null, timestamp: 0, version: CACHE_VERSION };
+    cachedData = {  : null, timestamp: 0, version: CACHE_VERSION };
   }
 
   if (cachedData.data && (now - cachedData.timestamp < CACHE_TTL)) {

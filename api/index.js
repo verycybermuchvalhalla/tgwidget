@@ -80,7 +80,7 @@ async function fetchFromRSSHub(channel) {
   
   const rssText = await response.text();
   
-  // Проверяем, что это действительно XML
+  // Проверка на XML
   if (!rssText.includes('<rss') && !rssText.includes('<feed')) {
     throw new Error('RSSHub вернул не XML');
   }
@@ -96,20 +96,33 @@ async function fetchFromRSSHub(channel) {
       const pubDate = $(el).find('pubDate').text();
       const guid = link.split('/').pop();
       
-      // Очищаем description от дублирующей цитаты
+      // 🔥 ВАЖНО: правильно очищаем description от обрезанной цитаты
+      // Создаём новый cheerio-инстанс для парсинга HTML внутри description
       const $desc = cheerio.load(description, { xmlMode: false });
-      $desc('blockquote').remove();
+      
+      // 1. Удаляем блок с обрезанной цитатой (он всегда в начале)
       $desc('.rsshub-quote').remove();
+      $desc('blockquote').remove();
       
-      let textHtml = $desc.root().text() || description;
-      textHtml = textHtml.replace(/^<p>/, '').replace(/<\/p>$/, '').trim();
+      // 2. Получаем ОСТАВШИЙСЯ контент
+      // Берём всё, что осталось в body
+      let cleanHtml = $desc('body').html() || $desc.root().html() || description;
       
-      // Ищем картинку
+      // 3. Чистим от лишних обёрток
+      cleanHtml = cleanHtml
+        .replace(/^<p>/i, '').replace(/<\/p>$/i, '')
+        .replace(/^\s*<br\s*\/?>\s*/i, '').replace(/\s*<br\s*\/?>\s*$/i, '')
+        .trim();
+      
+      // Если после чистки пусто — берем title
+      const textHtml = cleanHtml || title;
+      
+      // 🔍 Ищем картинку в description (она обычно в конце)
       let image = null;
       const imgMatch = description.match(/<img[^>]+src="([^"]+)"/i);
       if (imgMatch) image = imgMatch[1];
       
-      // Ищем YouTube
+      // 🔍 Ищем YouTube для эмбеда (только если нет картинки)
       let embedData = null;
       if (!image) {
         const ytMatch = description.match(/https?:\/\/(www\.)?(youtube\.com|youtu\.be)\/[^\s<"]+/i);
@@ -121,16 +134,21 @@ async function fetchFromRSSHub(channel) {
       const date = pubDate ? Math.floor(new Date(pubDate).getTime() / 1000) : 0;
       
       if (textHtml || image || embedData) {
-        posts.push({ text: textHtml, image, embed: embedData, date, id: guid });
+        posts.push({ 
+          text: textHtml,  // ✅ Теперь здесь ПОЛНЫЙ текст!
+          image, 
+          embed: embedData, 
+          date, 
+          id: guid 
+        });
       }
     } catch (e) {
-      console.warn('⚠️ Ошибка парсинга одного поста:', e.message);
+      console.warn('⚠️ Ошибка парсинга поста:', e.message);
     }
   });
 
   return posts.sort((a, b) => b.date - a.date);
 }
-
 // ===== Функция 2: Прямой парсинг t.me/s/ (фоллбэк) =====
 async function fetchFromTelegramWeb(channel) {
   const response = await fetch(`https://t.me/s/${channel}`, {

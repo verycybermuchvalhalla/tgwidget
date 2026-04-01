@@ -1,47 +1,66 @@
 const fetch = require('node-fetch');
 const cheerio = require('cheerio');
 
-const CACHE_TTL = 5 * 60 * 1000; 
+// Настройки
+const CACHE_TTL = 10 * 60 * 1000; // 10 минут
 const POSTS_LIMIT = 5;
-const CACHE_VERSION = 'v25'; // Смена версии сбросит старый плохой кэш
+const CACHE_VERSION = 'v26'; // Новая версия для сброса старого кэша
 
 let cachedData = { data: null, timestamp: 0, version: CACHE_VERSION };
 
-// Умная очистка контента
-function sanitizeHtml(html) {
-    if (!html) return '';
-    const $ = cheerio.load(html);
-    
-    // Удаляем всё, что RSSHub сует в начало (цитаты, повторы автора)
-    $('.rsshub-quote, blockquote, .tgme_widget_message_author_name, .tgme_widget_message_forwarded_from').remove();
-    
-    // Убираем пустые элементы и лишние переносы
-    $('a:empty, p:empty').remove();
-    
-    let result = $.html().trim();
-    // Чистим "хвосты" из <br>
-    return result.replace(/^(?:\s*<br\s*\/?>\s*)+|(?:\s*<br\s*\/?>\s*)+$/gi, '');
-}
-
+/**
+ * Вспомогательная функция для fetch с таймаутом
+ */
 async function fetchWithTimeout(url, options = {}) {
+    const { timeout = 12000 } = options;
     const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), 12000);
+    const id = setTimeout(() => controller.abort(), timeout);
+
     try {
         const response = await fetch(url, { ...options, signal: controller.signal });
         clearTimeout(id);
         return response;
-    } catch (e) {
+    } catch (error) {
         clearTimeout(id);
-        throw e;
+        throw error;
     }
+}
+
+/**
+ * Чистка контента от мусора RSSHub и лишних оберток Cheerio
+ */
+function sanitizeContent(html) {
+    if (!html) return '';
+    
+    // Загружаем фрагмент. fragment: true предотвращает добавление html/body
+    const $ = cheerio.load(html, null, false);
+    
+    // 1. Удаляем цитаты RSSHub ("загогулины") и служебную инфу
+    $('.rsshub-quote, blockquote, .tgme_widget_message_author_name, .tgme_widget_message_forwarded_from').remove();
+    
+    // 2. Удаляем пустые ссылки и параграфы, которые могут остаться после удаления цитат
+    $('a').each((i, el) => {
+        if ($(el).text().trim() === '' && $(el).find('img').length === 0) {
+            $(el).remove();
+        }
+    });
+
+    // 3. Вытаскиваем результат
+    let result = $.html().trim();
+    
+    // 4. Финальная чистка от лишних переносов строк в начале и в конце
+    return result.replace(/^(?:\s*<br\s*\/?>\s*)+|(?:\s*<br\s*\/?>\s*)+$/gi, '');
 }
 
 module.exports = async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET');
-    res.setHeader('Cache-Control', 's-maxage=300, stale-while-revalidate');
+    res.setHeader('Cache-Control', 's-maxage=600, stale-while-revalidate');
 
-    const { channel, limit = POSTS_LIMIT, offset = 0 } = req.query;
+    const channel = req.query.channel;
+    const limit = parseInt(req.query.limit) || POSTS_LIMIT;
+    const offset = parseInt(req.query.offset) || 0;
+
     if (!channel) return res.status(400).json({ error: 'No channel' });
 
     const now = Date.now();
@@ -50,56 +69,63 @@ module.exports = async (req, res) => {
     }
 
     if (cachedData.data && (now - cachedData.timestamp < CACHE_TTL)) {
-        return res.status(200).json(cachedData.data.slice(Number(offset), Number(offset) + Number(limit)));
+        return res.status(200).json(cachedData.data.slice(offset, offset + limit));
     }
 
-    let posts = [];
     try {
-        console.log('--- Attempting RSSHub ---');
-        posts = await fetchFromRSSHub(channel);
-    } catch (e) {
-        console.warn('--- RSSHub failed, switching to Web ---', e.message);
-        try {
-            posts = await fetchFromTelegramWeb(channel);
-        } catch (e2) {
-            console.error('--- Critical: Both methods failed ---');
+        const posts = await fetchFromRSSHub(channel);
+        if (posts && posts.length > 0) {
+            cachedData = { data: posts, timestamp: now, version: CACHE_VERSION };
+            return res.status(200).json(posts.slice(offset, offset + limit));
         }
+        throw new Error('RSSHub empty');
+    } catch (e) {
+        console.warn('RSSHub failed, trying Web fallback...', e.message);
+        try {
+            const posts = await fetchFromTelegramWeb(channel);
+            if (posts && posts.length > 0) {
+                cachedData = { data: posts, timestamp: now, version: CACHE_VERSION };
+                return res.status(200).json(posts.slice(offset, offset + limit));
+            }
+        } catch (e2) {
+            console.error('All methods failed');
+        }
+        
+        if (cachedData.data) return res.status(200).json(cachedData.data.slice(offset, offset + limit));
+        return res.status(500).json({ error: 'Failed to fetch' });
     }
-
-    if (posts.length > 0) {
-        // Всегда сортируем по дате (свежие сверху)
-        posts.sort((a, b) => b.date - a.date);
-        cachedData = { data: posts, timestamp: now, version: CACHE_VERSION };
-        return res.status(200).json(posts.slice(Number(offset), Number(offset) + Number(limit)));
-    }
-
-    if (cachedData.data) return res.status(200).json(cachedData.data.slice(Number(offset), Number(offset) + Number(limit)));
-    res.status(500).json({ error: 'All sources failed' });
 };
 
 async function fetchFromRSSHub(channel) {
     const response = await fetchWithTimeout(`https://rsshub.app/telegram/channel/${channel}`, {
         headers: { 'User-Agent': 'Mozilla/5.0' }
     });
-    if (!response.ok) throw new Error('RSSHub bad response');
     
     const text = await response.text();
     const $ = cheerio.load(text, { xmlMode: true });
-    const items = [];
+    const posts = [];
 
     $('item').each((i, el) => {
-        const desc = $(el).find('description').text();
-        const $temp = cheerio.load(desc);
-        const image = $temp('img').first().attr('src') || null;
+        const description = $(el).find('description').text() || '';
+        const link = $(el).find('link').text() || '';
+        const pubDate = $(el).find('pubDate').text();
+
+        // Обрабатываем описание отдельно
+        const $desc = cheerio.load(description);
         
-        items.push({
-            id: $(el).find('link').text().split('/').pop() || i,
-            text: sanitizeHtml(desc),
-            image,
-            date: Math.floor(new Date($(el).find('pubDate').text()).getTime() / 1000)
+        // Сначала достаем картинку
+        let image = $desc('img').first().attr('src') || null;
+        // Удаляем все картинки из текста, чтобы они не дублировались в JSON
+        $desc('img').remove();
+
+        posts.push({
+            id: link.split('/').pop() || i,
+            text: sanitizeContent($desc.html()),
+            image: image,
+            date: Math.floor(new Date(pubDate).getTime() / 1000)
         });
     });
-    return items;
+    return posts.sort((a, b) => b.date - a.date);
 }
 
 async function fetchFromTelegramWeb(channel) {
@@ -108,11 +134,12 @@ async function fetchFromTelegramWeb(channel) {
     });
     const html = await response.text();
     const $ = cheerio.load(html);
-    const items = [];
+    const posts = [];
 
     $('.tgme_widget_message').each((i, el) => {
         const $el = $(el);
         const textHtml = $el.find('.tgme_widget_message_text').html();
+        
         let image = null;
         const photoStyle = $el.find('.tgme_widget_message_photo_wrap').attr('style');
         if (photoStyle) {
@@ -121,14 +148,16 @@ async function fetchFromTelegramWeb(channel) {
         }
 
         const dateStr = $el.find('time').attr('datetime');
+        const date = dateStr ? Math.floor(new Date(dateStr).getTime() / 1000) : 0;
+
         if (textHtml || image) {
-            items.push({
+            posts.push({
                 id: $el.attr('data-post') ? $el.attr('data-post').split('/').pop() : i,
-                text: sanitizeHtml(textHtml),
+                text: sanitizeContent(textHtml),
                 image,
-                date: dateStr ? Math.floor(new Date(dateStr).getTime() / 1000) : 0
+                date
             });
         }
     });
-    return items;
+    return posts.sort((a, b) => b.date - a.date);
 }

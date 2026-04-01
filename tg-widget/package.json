@@ -1,0 +1,11 @@
+{
+  "name": "tg-widget",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node api/index.js"
+  },
+  "dependencies": {
+    "node-fetch": "^2.6.9",
+    "cheerio": "^1.0.0-rc.12"
+  }
+}

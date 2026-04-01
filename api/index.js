@@ -31,7 +31,7 @@ module.exports = async (req, res) => {
 
   try {
     // 🔥 ИСПОЛЬЗУЕМ RSSHUB ВМЕСТО ПРЯМОГО ПАРСИНГА
-    const rssUrl = `https://rsshub.app/telegram/channel/${channel}`;
+    const rssUrl = `https://rsshub.app/telegram/channel/cybervalhalla`;
     const response = await fetch(rssUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'

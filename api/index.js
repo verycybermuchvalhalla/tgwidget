@@ -68,40 +68,63 @@ module.exports = async (req, res) => {
 };
 
 async function fetchFromRSSHub(channel) {
-    const rssUrl = `https://rsshub.app/telegram/channel/${channel}`;
-    const response = await fetchWithTimeout(rssUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    if (!response.ok) throw new Error(`RSSHub Status: ${response.status}`);
-
+    const response = await fetchWithTimeout(`https://rsshub.app/telegram/channel/${channel}`, {
+        headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
     const rssText = await response.text();
     const $ = cheerio.load(rssText, { xmlMode: true });
     const posts = [];
 
     $('item').each((i, el) => {
+        const title = $(el).find('title').text().trim();
         const description = $(el).find('description').text() || '';
+        const link = $(el).find('link').text();
+        const pubDate = $(el).find('pubDate').text();
+        
+        // Загружаем описание как HTML для манипуляций
         const $desc = cheerio.load(description);
         
-        // Извлекаем первую картинку и УДАЛЯЕМ её из текста, чтобы не было дубля
+        // 🔥 УДАЛЯЕМ те самые "загогулины" RSShub
+        $desc('.rsshub-quote').remove(); 
+        $desc('blockquote').remove();
+        
+        // Удаляем пустые ссылки, которые иногда остаются после вырезания цитат
+        $desc('a').each((i, a) => {
+            if ($desc(a).text().trim() === '' && $desc(a).find('img').length === 0) {
+                $desc(a).remove();
+            }
+        });
+
+        // Извлекаем основную картинку (если есть)
         let image = null;
-        const $img = $desc('img').first();
-        if ($img.length) {
-            image = $img.attr('src');
-            $img.remove(); 
+        const imgTag = $desc('img').first();
+        if (imgTag.length) {
+            image = imgTag.attr('src');
+            imgTag.remove(); // Убираем из текста, чтобы не дублировать с основным полем image
         }
 
-        // Чистим текст от мусора RSSHub
-        $desc('.rsshub-quote, blockquote').remove();
-        
-        const cleanHtml = $desc.html().trim();
-        const link = $(el).find('link').text();
-        const date = Math.floor(new Date($(el).find('pubDate').text()).getTime() / 1000);
+        // Поиск YouTube
+        let embed = null;
+        const ytMatch = description.match(/https?:\/\/(www\.)?(youtube\.com|youtu\.be)\/[^\s<"]+/i);
+        if (ytMatch) {
+            embed = { type: 'youtube', link: ytMatch[0], title: 'YouTube Video' };
+        }
+
+        // Получаем чистый HTML без лишних оберток
+        let cleanHtml = $desc('body').html() || title;
+
+        // Финальная чистка от лишних переносов в начале и конце
+        cleanHtml = cleanHtml.replace(/^(?:\s*<br\s*\/?>\s*)+|(?:\s*<br\s*\/?>\s*)+$/gi, '').trim();
 
         posts.push({
-            id: link.split('/').pop(),
+            id: link.split('/').pop() || i,
             text: cleanHtml,
             image,
-            date
+            embed,
+            date: Math.floor(new Date(pubDate).getTime() / 1000)
         });
     });
+
     return posts.sort((a, b) => b.date - a.date);
 }
 

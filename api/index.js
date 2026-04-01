@@ -1,13 +1,6 @@
-const fetch = require('node-fetch');
-const cheerio = require('cheerio');
-
-const CACHE_TTL = 10 * 60 * 1000;
-const POSTS_LIMIT = 5;
-const CACHE_VERSION = 'v13';
-
-// 🔥 ИСПРАВЛЕНО: data: null вместо просто null
+// ✅ ПРАВИЛЬНО (скопируйте именно так):
 let cachedData = {
-  data: null,
+   null,        // ← ← ← ключ "  " + двоеточие + пробел + null
   timestamp: 0,
   version: CACHE_VERSION
 };

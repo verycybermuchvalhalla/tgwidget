@@ -43,7 +43,7 @@ module.exports = async (req, res) => {
     let debugLog = { rss: null, web: null };
 
     try {
-        const rssUrl = `https://rsshub.app/telegram/channel/${channel}?fulltext=1`;
+        const rssUrl = `https://rsshub.henry.wang/telegram/channel/${channel}?fulltext=1`;
         const response = await fetchWithTimeout(rssUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
         if (!response.ok) throw new Error(`RSSHub HTTP Status ${response.status}`);
         
@@ -60,7 +60,7 @@ module.exports = async (req, res) => {
             $desc('img').remove();
 
             const ytMatch = desc.match(/https?:\/\/(www\.)?(youtube\.com|youtu\.be)\/[^\s<"']+/i);
-            const embed = ytMatch ? { type: 'youtube', url: ytMatch[0] } : null;
+            const embed = ytMatch ? { type: 'youtube', link: ytMatch[0] } : null;
 
             posts.push({
                 id: link.split('/').pop() || i,
@@ -124,7 +124,7 @@ async function fetchFromTelegramWeb(channel) {
         }
 
         const ytMatch = textHtml ? textHtml.match(/https?:\/\/(www\.)?(youtube\.com|youtu\.be)\/[^\s<"']+/i) : null;
-        const embed = ytMatch ? { type: 'youtube', url: ytMatch[0] } : null;
+        const embed = ytMatch ? { type: 'youtube', link: ytMatch[0] } : null;
 
         const dateStr = $el.find('time').attr('datetime');
         const date = dateStr ? Math.floor(new Date(dateStr).getTime() / 1000) : 0;

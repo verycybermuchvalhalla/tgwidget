@@ -1,160 +1,85 @@
 const fetch = require('node-fetch');
 const cheerio = require('cheerio');
 
-// Настройки кэширования
 const CACHE_TTL = 10 * 60 * 1000; 
 const POSTS_LIMIT = 5;
-const CACHE_VERSION = 'v27'; // Подняли версию для сброса старого кэша
+const CACHE_VERSION = 'v30'; // Сбросим кэш
 
 let cachedData = { data: null, timestamp: 0, version: CACHE_VERSION };
 
-/**
- * Вспомогательная функция для fetch с таймаутом
- */
+function sanitizeContent(html) {
+    if (!html) return '';
+    // fragment: true предотвращает появление <html><body>
+    const $ = cheerio.load(html, null, false);
+    
+    // Удаляем цитаты и мусор
+    $('.rsshub-quote, blockquote, .tgme_widget_message_author_name, .tgme_widget_message_forwarded_from').remove();
+    
+    // Убираем пустые ссылки
+    $('a:empty').remove();
+
+    return $.html().trim().replace(/^(?:\s*<br\s*\/?>\s*)+|(?:\s*<br\s*\/?>\s*)+$/gi, '');
+}
+
 async function fetchWithTimeout(url, options = {}) {
-    const { timeout = 12000 } = options;
     const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), timeout);
+    const id = setTimeout(() => controller.abort(), 12000);
     try {
         const response = await fetch(url, { ...options, signal: controller.signal });
         clearTimeout(id);
         return response;
-    } catch (error) {
+    } catch (e) {
         clearTimeout(id);
-        throw error;
+        throw e;
     }
-}
-
-/**
- * Глубокая очистка контента от мусора RSSHub
- */
-function sanitizeContent(html) {
-    if (!html) return '';
-    
-    // КРИТИЧНО: флаг false отключает автоматическое добавление <html><body>
-    const $ = cheerio.load(html, null, false);
-    
-    // Удаляем цитаты RSSHub ("загогулины") и служебные блоки
-    $('.rsshub-quote, blockquote, .tgme_widget_message_author_name, .tgme_widget_message_forwarded_from').remove();
-    
-    // Удаляем пустые ссылки, которые остаются после вырезания цитат
-    $('a').each((i, el) => {
-        if ($(el).text().trim() === '' && $(el).find('img').length === 0) {
-            $(el).remove();
-        }
-    });
-
-    let result = $.html().trim();
-    
-    // Убираем лишние <br> в начале и конце, чтобы текст прилегал к краям
-    return result.replace(/^(?:\s*<br\s*\/?>\s*)+|(?:\s*<br\s*\/?>\s*)+$/gi, '');
 }
 
 module.exports = async (req, res) => {
-    // Заголовки для кэширования на стороне Vercel Edge
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET');
     res.setHeader('Cache-Control', 's-maxage=600, stale-while-revalidate');
 
-    const channel = req.query.channel;
-    const limit = parseInt(req.query.limit) || POSTS_LIMIT;
-    const offset = parseInt(req.query.offset) || 0;
-
+    const { channel, limit = POSTS_LIMIT, offset = 0 } = req.query;
     if (!channel) return res.status(400).json({ error: 'No channel' });
 
-    const now = Date.now();
-    if (cachedData.version !== CACHE_VERSION) {
-        cachedData = { data: null, timestamp: 0, version: CACHE_VERSION };
-    }
-
-    // Проверка внутреннего кэша приложения
-    if (cachedData.data && (now - cachedData.timestamp < CACHE_TTL)) {
-        return res.status(200).json(cachedData.data.slice(offset, offset + limit));
+    if (cachedData.version !== CACHE_VERSION) cachedData = { data: null, timestamp: 0, version: CACHE_VERSION };
+    if (cachedData.data && (Date.now() - cachedData.timestamp < CACHE_TTL)) {
+        return res.status(200).json(cachedData.data.slice(Number(offset), Number(offset) + Number(limit)));
     }
 
     try {
-        const posts = await fetchFromRSSHub(channel);
-        if (posts && posts.length > 0) {
-            cachedData = { data: posts, timestamp: now, version: CACHE_VERSION };
-            return res.status(200).json(posts.slice(offset, offset + limit));
-        }
-        throw new Error('RSSHub empty');
+        // ДОБАВИЛИ ?fulltext=1 чтобы RSSHub не резал текст
+        const rssUrl = `https://rsshub.app/telegram/channel/${channel}?fulltext=1`;
+        const response = await fetchWithTimeout(rssUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+        const text = await response.text();
+        const $ = cheerio.load(text, { xmlMode: true });
+        const posts = [];
+
+        $('item').each((i, el) => {
+            const desc = $(el).find('description').text() || '';
+            const link = $(el).find('link').text() || '';
+            
+            const $desc = cheerio.load(desc, null, false);
+            const image = $desc('img').first().attr('src') || null;
+            $desc('img').remove();
+
+            // Ищем YouTube ссылку для эмбеда
+            const ytMatch = desc.match(/https?:\/\/(www\.)?(youtube\.com|youtu\.be)\/[^\s<"']+/i);
+            const embed = ytMatch ? { type: 'youtube', url: ytMatch[0] } : null;
+
+            posts.push({
+                id: link.split('/').pop() || i,
+                text: sanitizeContent($desc.html()),
+                image,
+                embed,
+                date: Math.floor(new Date($(el).find('pubDate').text()).getTime() / 1000)
+            });
+        });
+
+        posts.sort((a, b) => b.date - a.date);
+        cachedData = { data: posts, timestamp: Date.now(), version: CACHE_VERSION };
+        return res.status(200).json(posts.slice(Number(offset), Number(offset) + Number(limit)));
+
     } catch (e) {
-        console.warn('RSSHub failed, trying Web fallback...');
-        try {
-            const posts = await fetchFromTelegramWeb(channel);
-            if (posts && posts.length > 0) {
-                cachedData = { data: posts, timestamp: now, version: CACHE_VERSION };
-                return res.status(200).json(posts.slice(offset, offset + limit));
-            }
-        } catch (e2) {
-            console.error('All methods failed');
-        }
-        
-        if (cachedData.data) return res.status(200).json(cachedData.data.slice(offset, offset + limit));
-        return res.status(500).json({ error: 'Failed' });
+        return res.status(500).json({ error: e.message });
     }
 };
-
-async function fetchFromRSSHub(channel) {
-    const response = await fetchWithTimeout(`https://rsshub.app/telegram/channel/${channel}`, {
-        headers: { 'User-Agent': 'Mozilla/5.0' }
-    });
-    
-    const text = await response.text();
-    const $ = cheerio.load(text, { xmlMode: true });
-    const posts = [];
-
-    $('item').each((i, el) => {
-        const description = $(el).find('description').text() || '';
-        const link = $(el).find('link').text() || '';
-        const pubDate = $(el).find('pubDate').text();
-
-        // Обрабатываем описание отдельно, вырезая картинки в отдельное поле
-        const $desc = cheerio.load(description, null, false);
-        let image = $desc('img').first().attr('src') || null;
-        $desc('img').remove();
-
-        posts.push({
-            id: link.split('/').pop() || i,
-            text: sanitizeContent($desc.html()),
-            image: image,
-            date: Math.floor(new Date(pubDate).getTime() / 1000)
-        });
-    });
-    return posts.sort((a, b) => b.date - a.date); // Сортировка по дате
-}
-
-async function fetchFromTelegramWeb(channel) {
-    const response = await fetchWithTimeout(`https://t.me/s/${channel}`, {
-        headers: { 'User-Agent': 'Mozilla/5.0' }
-    });
-    const html = await response.text();
-    const $ = cheerio.load(html);
-    const posts = [];
-
-    $('.tgme_widget_message').each((i, el) => {
-        const $el = $(el);
-        const textHtml = $el.find('.tgme_widget_message_text').html();
-        
-        let image = null;
-        const photoStyle = $el.find('.tgme_widget_message_photo_wrap').attr('style');
-        if (photoStyle) {
-            const m = photoStyle.match(/url\(['"]?(.+?)['"]?\)/);
-            if (m) image = m[1];
-        }
-
-        const dateStr = $el.find('time').attr('datetime');
-        const date = dateStr ? Math.floor(new Date(dateStr).getTime() / 1000) : 0;
-
-        if (textHtml || image) {
-            posts.push({
-                id: $el.attr('data-post') ? $el.attr('data-post').split('/').pop() : i,
-                text: sanitizeContent(textHtml),
-                image,
-                date
-            });
-        }
-    });
-    return posts.sort((a, b) => b.date - a.date);
-}

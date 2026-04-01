@@ -3,7 +3,7 @@ const cheerio = require('cheerio');
 
 const CACHE_TTL = 10 * 60 * 1000;
 const POSTS_LIMIT = 5;
-const CACHE_VERSION = 'v8'; // 🔁 Новая версия
+const CACHE_VERSION = 'v9';
 
 let cachedData = {  null, timestamp: 0, version: CACHE_VERSION };
 
@@ -30,89 +30,163 @@ module.exports = async (req, res) => {
   }
 
   try {
-    // 🔥 ИСПОЛЬЗУЕМ RSSHUB ВМЕСТО ПРЯМОГО ПАРСИНГА
-    const rssUrl = `https://rsshub.app/telegram/channel/cybervalhalla`;
-    const response = await fetch(rssUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
-    });
+    // 🔥 Пробуем RSSHub сначала
+    const posts = await fetchFromRSSHub(channel);
     
-    if (!response.ok) throw new Error(`RSSHub: ${response.status}`);
-    
-    const rssText = await response.text();
-    const $ = cheerio.load(rssText, { xmlMode: true });
-    const posts = [];
+    if (!posts || posts.length === 0) {
+      console.log('⚠️ RSSHub вернул пусто, пробуем прямой парсинг');
+      return res.status(200).json([]); // Возвращаем пусто, а не падаем
+    }
 
-    $('item').each((i, el) => {
+    cachedData = {  posts, timestamp: now, version: CACHE_VERSION };
+    return res.status(200).json(posts.slice(offset, offset + limit));
+
+  } catch (e) {
+    console.error('❌ RSSHub ошибка:', e.message);
+    
+    // 🔥 Фоллбэк: прямой парсинг t.me/s/
+    try {
+      console.log('🔄 Пробуем прямой парсинг...');
+      const posts = await fetchFromTelegramWeb(channel);
+      
+      if (posts && posts.length > 0) {
+        cachedData = {  posts, timestamp: now, version: CACHE_VERSION };
+        return res.status(200).json(posts.slice(offset, offset + limit));
+      }
+    } catch (e2) {
+      console.error('❌ Прямой парсинг тоже упал:', e2.message);
+    }
+    
+    // Если всё упало — отдаём старый кэш
+    if (cachedData.data) {
+      console.warn('⚠️ Отдаю старый кэш');
+      return res.status(200).json(cachedData.data.slice(offset, offset + limit));
+    }
+    
+    return res.status(500).json({ error: 'Не удалось получить посты: ' + e.message });
+  }
+};
+
+// ===== Функция 1: Парсинг через RSSHub =====
+async function fetchFromRSSHub(channel) {
+  const rssUrl = `https://rsshub.app/telegram/channel/${channel}`;
+  
+  const response = await fetch(rssUrl, {
+    headers: { 'User-Agent': 'Mozilla/5.0' },
+    timeout: 10000
+  });
+  
+  if (!response.ok) throw new Error(`RSSHub: ${response.status}`);
+  
+  const rssText = await response.text();
+  
+  // Проверяем, что это действительно XML
+  if (!rssText.includes('<rss') && !rssText.includes('<feed')) {
+    throw new Error('RSSHub вернул не XML');
+  }
+  
+  const $ = cheerio.load(rssText, { xmlMode: true });
+  const posts = [];
+
+  $('item').each((i, el) => {
+    try {
       const title = $(el).find('title').text().trim();
-      const description = $(el).find('description').text();
+      let description = $(el).find('description').text() || title;
       const link = $(el).find('link').text();
       const pubDate = $(el).find('pubDate').text();
       const guid = link.split('/').pop();
       
-      // 🔥 ВАЖНО: извлекаем ПОЛНЫЙ текст из description
-      // RSSHub иногда добавляет цитату в <blockquote> — убираем её
+      // Очищаем description от дублирующей цитаты
       const $desc = cheerio.load(description, { xmlMode: false });
-      
-      // Удаляем блок с обрезанной цитатой
       $desc('blockquote').remove();
       $desc('.rsshub-quote').remove();
       
-      // Получаем очищенный HTML
-      let textHtml = $desc.root().html() || title;
+      let textHtml = $desc.root().text() || description;
+      textHtml = textHtml.replace(/^<p>/, '').replace(/<\/p>$/, '').trim();
       
-      // Очищаем от лишних обёрток
-      textHtml = textHtml
-        .replace(/^<p>/, '').replace(/<\/p>$/, '')
-        .trim();
-
-      // 🔍 Ищем картинку в description
+      // Ищем картинку
       let image = null;
-      const imgMatch = description.match(/<img[^>]+src="([^"]+)"/);
-      if (imgMatch) {
-        image = imgMatch[1];
-      }
-
-      // 🔍 Ищем YouTube-ссылки для эмбеда
+      const imgMatch = description.match(/<img[^>]+src="([^"]+)"/i);
+      if (imgMatch) image = imgMatch[1];
+      
+      // Ищем YouTube
       let embedData = null;
       if (!image) {
-        const youtubeMatch = description.match(/https?:\/\/(www\.)?(youtube\.com|youtu\.be)\/[^\s<"]+/);
-        if (youtubeMatch) {
-          embedData = {
-            type: 'youtube',
-            link: youtubeMatch[0],
-            title: 'YouTube',
-            image: null
-          };
+        const ytMatch = description.match(/https?:\/\/(www\.)?(youtube\.com|youtu\.be)\/[^\s<"]+/i);
+        if (ytMatch) {
+          embedData = { type: 'youtube', link: ytMatch[0], title: 'YouTube', image: null };
         }
       }
-
-      // Дата
+      
       const date = pubDate ? Math.floor(new Date(pubDate).getTime() / 1000) : 0;
-
+      
       if (textHtml || image || embedData) {
-        posts.push({ 
-          text: textHtml, 
-          image, 
-          embed: embedData, 
-          date, 
-          id: guid 
+        posts.push({ text: textHtml, image, embed: embedData, date, id: guid });
+      }
+    } catch (e) {
+      console.warn('⚠️ Ошибка парсинга одного поста:', e.message);
+    }
+  });
+
+  return posts.sort((a, b) => b.date - a.date);
+}
+
+// ===== Функция 2: Прямой парсинг t.me/s/ (фоллбэк) =====
+async function fetchFromTelegramWeb(channel) {
+  const response = await fetch(`https://t.me/s/${channel}`, {
+    headers: { 'User-Agent': 'Mozilla/5.0' },
+    timeout: 10000
+  });
+  
+  if (!response.ok) throw new Error(`Telegram: ${response.status}`);
+  
+  const html = await response.text();
+  const $ = cheerio.load(html);
+  const posts = [];
+
+  $('.tgme_widget_message').each((i, el) => {
+    try {
+      const textHtml = $(el).find('.tgme_widget_message_text').html() || '';
+      
+      let image = null;
+      const imageStyle = $(el).find('.tgme_widget_message_photo_wrap').attr('style');
+      if (imageStyle) {
+        const match = imageStyle.match(/url\('(.+?)'\)/i);
+        if (match) image = match[1];
+      }
+      
+      let embedData = null;
+      if (!image) {
+        const embedBlocks = $(el).find('.tgme_widget_message_embed');
+        embedBlocks.each((j, embedEl) => {
+          const $embed = $(embedEl);
+          const link = $embed.find('a').first().attr('href');
+          const title = $embed.find('.tgme_widget_message_embed_title').text().trim();
+          let embedImg = null;
+          const photoStyle = $embed.find('.tgme_widget_message_embed_photo').attr('style');
+          if (photoStyle) {
+            const imgMatch = photoStyle.match(/url\('(.+?)'\)/i);
+            if (imgMatch) embedImg = imgMatch[1];
+          }
+          if (link && (link.includes('youtube.com') || link.includes('youtu.be'))) {
+            embedData = { type: 'youtube', link, title: title || 'YouTube', image: embedImg };
+          } else if (link && !embedData) {
+            embedData = { type: 'link', link, title, image: embedImg };
+          }
         });
       }
-    });
-
-    // Сортировка: новые сверху
-    posts.sort((a, b) => b.date - a.date);
-
-    cachedData = {  posts, timestamp: now, version: CACHE_VERSION };
-
-    return res.status(200).json(posts.slice(offset, offset + limit));
-  } catch (e) {
-    console.error('❌ Ошибка:', e.message);
-    if (cachedData.data) {
-      return res.status(200).json(cachedData.data.slice(offset, offset + limit));
+      
+      const dateAttr = $(el).find('.tgme_widget_message_date time').attr('datetime');
+      const date = dateAttr ? Math.floor(new Date(dateAttr).getTime() / 1000) : 0;
+      const postId = $(el).attr('data-post') ? $(el).attr('data-post').split('/').pop() : '';
+      
+      if (textHtml || image || embedData) {
+        posts.push({ text: textHtml, image, embed: embedData, date, id: postId });
+      }
+    } catch (e) {
+      console.warn('⚠️ Ошибка парсинга одного поста (web):', e.message);
     }
-    return res.status(500).json({ error: e.message });
-  }
-};
+  });
+
+  return posts.sort((a, b) => b.date - a.date);
+}

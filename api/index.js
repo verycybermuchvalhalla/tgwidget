@@ -64,22 +64,40 @@ module.exports = async (req, res) => {
 
         $('item').each((i, el) => {
             const $item = $(el);
-            let desc = $item.find('description').text(); // RSS обычно хранит HTML внутри как текст или CDATA
+            let desc = $item.find('description').text();
 
             const $desc = cheerio.load(desc, null, false);
-            const image = $desc('img').first().attr('src') || null;
-            $desc('img').remove();
-
+            
+            // 1. Ищем YouTube ссылку
             const ytMatch = desc.match(/https?:\/\/(www\.)?(youtube\.com|youtu\.be)\/[^\s<"']+/i);
             const embed = ytMatch ? { type: 'youtube', link: ytMatch[0] } : null;
 
+            // 2. Улучшенный поиск основной картинки
+            let image = null;
+            const images = $desc('img');
+            
+            images.each((idx, img) => {
+                const src = $(img).attr('src');
+                // Пропускаем картинки, которые являются превьюшками YouTube или мелкими иконками
+                if (src && !src.includes('ytimg.com') && !src.includes('youtube.com')) {
+                    image = src;
+                    return false; // Нашли нормальное фото, выходим из цикла
+                }
+            });
+
+            // 3. Чистим ВСЕ картинки из текста, чтобы они не мешались
+            $desc('img').remove();
+
+            const link = $item.find('link').text() || '';
+
             posts.push({
-                id: $item.find('link').text().split('/').pop() || String(i),
+                id: link.split('/').pop() || String(i),
                 text: sanitizeContent($desc.html()),
-                image,
-                embed,
+                image: image,
+                embed: embed,
                 date: Math.floor(new Date($item.find('pubDate').text()).getTime() / 1000)
             });
+        });
         });
 
         if (posts.length === 0) throw new Error('RSSHub returned 0 items');

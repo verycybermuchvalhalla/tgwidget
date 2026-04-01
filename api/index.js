@@ -1,100 +1,86 @@
 const fetch = require('node-fetch');
 const cheerio = require('cheerio');
 
-// Смена версии заставит сервер очистить память
-const CACHE_VERSION = 'v60'; 
-const CACHE_TTL = 5 * 60 * 1000; 
+const VERSION = 'v80';
+const TTL = 5 * 60 * 1000;
+let storageV80 = { posts: null, time: 0 };
 
-let cachedData = { data: null, timestamp: 0, version: CACHE_VERSION };
-
-function sanitizeContent(html) {
+function sanitize(html) {
     if (!html) return '';
-    // Используем xmlMode: false чтобы не плодить <html><body>
     const $ = cheerio.load(html, null, false);
-    
-    // Удаляем мусор телеграма
-    $('.tgme_widget_message_reply, .tgme_widget_message_author_name, .tgme_widget_message_forwarded_from, .tgme_widget_message_inline_keyboard').remove();
-    
-    // Удаляем кнопку "Read more", если она пришла в HTML
-    $('.tgme_widget_message_read_more').remove();
-
+    $('.tgme_widget_message_reply, .tgme_widget_message_author_name, .tgme_widget_message_forwarded_from, .tgme_widget_message_inline_keyboard, .tgme_widget_message_read_more').remove();
     return $.html().trim().replace(/^(?:\s*<br\s*\/?>\s*)+|(?:\s*<br\s*\/?>\s*)+$/gi, '');
 }
 
-module.exports = async (req, res) => {
-    // Убиваем кэширование на всех уровнях
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
+// Функция для получения ПОЛНОГО текста конкретного поста, если он обрезан
+async function getFullPostText(channel, postId) {
+    try {
+        const res = await fetch(`https://t.me/${channel}/${postId}?embed=1`);
+        const html = await res.text();
+        const $ = cheerio.load(html);
+        const fullHtml = $('.tgme_widget_message_text').html();
+        return fullHtml ? sanitize(fullHtml) : null;
+    } catch (e) {
+        return null;
+    }
+}
 
-    const { channel, limit = 5, offset = 0 } = req.query;
+module.exports = async (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+
+    const { channel, limit = 5 } = req.query;
     if (!channel) return res.status(400).json({ error: 'No channel' });
 
-    if (cachedData.version !== CACHE_VERSION) {
-        cachedData = { data: null, timestamp: 0, version: CACHE_VERSION };
-    }
-
-    // Если кэш свежий — отдаем его
-    if (cachedData.data && (Date.now() - cachedData.timestamp < CACHE_TTL)) {
-        const sliced = cachedData.data.slice(Number(offset), Number(offset) + Number(limit));
-        return res.status(200).json(sliced);
+    if (storageV80.posts && (Date.now() - storageV80.time < TTL)) {
+        return res.status(200).json(storageV80.posts.slice(0, Number(limit)));
     }
 
     try {
-        // Запрашиваем напрямую публичную веб-страницу канала
-        const response = await fetch(`https://t.me/s/${channel}`, {
-            headers: { 
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' 
-            }
-        });
-        
+        const response = await fetch(`https://t.me/s/${channel}`);
         const html = await response.text();
         const $ = cheerio.load(html);
-        const posts = [];
+        const results = [];
 
-        $('.tgme_widget_message').each((i, el) => {
+        // Собираем посты
+        const elements = $('.tgme_widget_message').toArray();
+        
+        for (const el of elements) {
             const $el = $(el);
-            
-            // ТЕКСТ: Ищем именно блок с текстом
-            const $textEl = $el.find('.tgme_widget_message_text');
-            const textHtml = $textEl.html() || "";
+            const postId = $el.attr('data-post') ? $el.attr('data-post').split('/').pop() : null;
+            if (!postId) continue;
 
-            // КАРТИНКА
+            let textHtml = $el.find('.tgme_widget_message_text').html() || "";
+            
+            // ДЕТЕКТОР ОБРЕЗКИ: если текст кончается на "…" или содержит кнопку "Read more"
+            if (textHtml.includes('…') || $el.find('.tgme_widget_message_read_more').length > 0) {
+                const fullText = await getFullPostText(channel, postId);
+                if (fullText) textHtml = fullText;
+            }
+
             let image = null;
-            const photoWrap = $el.find('.tgme_widget_message_photo_wrap').attr('style');
-            if (photoWrap) {
-                const m = photoWrap.match(/url\(['"]?(.+?)['"]?\)/);
+            const style = $el.find('.tgme_widget_message_photo_wrap').attr('style');
+            if (style) {
+                const m = style.match(/url\(['"]?(.+?)['"]?\)/);
                 if (m) image = m[1];
             }
 
-            // ВИДЕО/YouTube
-            const ytMatch = textHtml.match(/https?:\/\/(www\.)?(youtube\.com|youtu\.be)\/[^\s<"']+/i);
-            
-            // ДАТА
-            const dateStr = $el.find('time').attr('datetime');
-            const ts = dateStr ? Math.floor(new Date(dateStr).getTime() / 1000) : 0;
+            const yt = textHtml.match(/https?:\/\/(www\.)?(youtube\.com|youtu\.be)\/[^\s<"']+/i);
+            const date = $el.find('time').attr('datetime');
 
-            if (textHtml || image) {
-                posts.push({
-                    id: $el.attr('data-post') ? $el.attr('data-post').split('/').pop() : String(i),
-                    text: sanitizeContent(textHtml),
-                    image: image,
-                    embed: ytMatch ? { type: 'youtube', link: ytMatch[0] } : null,
-                    date: ts
-                });
-            }
-        });
-
-        // Сортируем (свежие сверху) и сохраняем
-        const finalPosts = posts.sort((a, b) => b.date - a.date);
-        
-        if (finalPosts.length > 0) {
-            cachedData = { data: finalPosts, timestamp: Date.now(), version: CACHE_VERSION };
-            return res.status(200).json(finalPosts.slice(Number(offset), Number(offset) + Number(limit)));
-        } else {
-            throw new Error("No posts found on page");
+            results.push({
+                id: postId,
+                text: textHtml.includes('…') ? textHtml : sanitize(textHtml), // Финальная чистка
+                image,
+                embed: yt ? { type: 'youtube', link: yt[0] } : null,
+                date: date ? Math.floor(new Date(date).getTime() / 1000) : 0
+            });
         }
+
+        const sorted = results.sort((a, b) => b.date - a.date);
+        storageV80 = { posts: sorted, time: Date.now() };
+        
+        return res.status(200).json(sorted.slice(0, Number(limit)));
 
     } catch (e) {
         return res.status(500).json({ error: e.message });

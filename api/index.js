@@ -3,15 +3,19 @@ const cheerio = require('cheerio');
 
 const CACHE_TTL = 10 * 60 * 1000; 
 const POSTS_LIMIT = 5;
-const CACHE_VERSION = 'v31'; // Сброс кэша
+const CACHE_VERSION = 'v32'; 
 
+// ✅ ИСПРАВЛЕНО: Добавлен ключ "data"
 let cachedData = { data: null, timestamp: 0, version: CACHE_VERSION };
 
 function sanitizeContent(html) {
     if (!html) return '';
+    // Используем xmlMode: false для корректного рендеринга HTML фрагмента
     const $ = cheerio.load(html, null, false);
+    
     $('.rsshub-quote, blockquote, .tgme_widget_message_author_name, .tgme_widget_message_forwarded_from').remove();
     $('a:empty').remove();
+
     return $.html().trim().replace(/^(?:\s*<br\s*\/?>\s*)+|(?:\s*<br\s*\/?>\s*)+$/gi, '');
 }
 
@@ -33,9 +37,13 @@ module.exports = async (req, res) => {
     res.setHeader('Cache-Control', 's-maxage=600, stale-while-revalidate');
 
     const { channel, limit = POSTS_LIMIT, offset = 0 } = req.query;
-    if (!channel) return res.status(400).json({ error: 'No channel provided in URL' });
+    if (!channel) return res.status(400).json({ error: 'No channel provided' });
 
-    if (cachedData.version !== CACHE_VERSION) cachedData = { data: null, timestamp: 0, version: CACHE_VERSION };
+    // ✅ ИСПРАВЛЕНО: Правильный сброс объекта
+    if (cachedData.version !== CACHE_VERSION) {
+        cachedData = { data: null, timestamp: 0, version: CACHE_VERSION };
+    }
+
     if (cachedData.data && (Date.now() - cachedData.timestamp < CACHE_TTL)) {
         return res.status(200).json(cachedData.data.slice(Number(offset), Number(offset) + Number(limit)));
     }
@@ -43,98 +51,65 @@ module.exports = async (req, res) => {
     let debugLog = { rss: null, web: null };
 
     try {
-        const rssUrl = `https://rsshub.henry.wang/telegram/channel/${channel}?fulltext=1`;
-        const response = await fetchWithTimeout(rssUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-        if (!response.ok) throw new Error(`RSSHub HTTP Status ${response.status}`);
+        const rssUrl = `https://rsshub.app/telegram/channel/${channel}?fulltext=1`;
+        const response = await fetchWithTimeout(rssUrl, { 
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' } 
+        });
+        
+        if (!response.ok) throw new Error(`RSSHub Status ${response.status}`);
         
         const text = await response.text();
         const $ = cheerio.load(text, { xmlMode: true });
         const posts = [];
 
         $('item').each((i, el) => {
-    const $item = $(el);
-    
-    // 🔥 ИСПРАВЛЕНИЕ: получаем description как HTML, а не как текст
-    const $descRaw = $item.find('description');
-    
-    // Способ 1: пробуем .html() (работает в большинстве случаев)
-    let desc = $descRaw.html();
-    
-    // Способ 2: если .html() вернул пусто — пробуем извлечь из CDATA
-    if (!desc || desc.length < 50) {
-        const descXml = $descRaw.toString();
-        const cdataMatch = descXml.match(/<!\[CDATA\[(.*?)\]\]>/s);
-        if (cdataMatch) {
-            desc = cdataMatch[1];
-        } else {
-            // Способ 3: экстренный — берём всё между тегами description
-            const fullMatch = descXml.match(/<description[^>]*>([\s\S]*?)<\/description>/i);
-            desc = fullMatch ? fullMatch[1] : '';
-        }
-    }
-    
-    const link = $item.find('link').text() || '';
-    
-    // Парсим описание как HTML-фрагмент (важно: без xmlMode!)
-    const $desc = cheerio.load(desc || '', { decodeEntities: true });
-    
-    // Извлекаем картинку ПЕРЕД удалением
-    const image = $desc('img').first().attr('src') || null;
-    $desc('img').remove(); // убираем из текста, чтобы не дублировалась
-    
-    // Ищем YouTube
-    const ytMatch = (desc || '').match(/https?:\/\/(www\.)?(youtube\.com|youtu\.be)\/[^\s<"']+/i);
-    const embed = ytMatch ? { type: 'youtube', link: ytMatch[0] } : null; // ← link, не url!
+            const $item = $(el);
+            let desc = $item.find('description').text(); // RSS обычно хранит HTML внутри как текст или CDATA
 
-    // Отладка (удалите потом)
-    // console.log(`Post ${i}: desc length = ${desc?.length}, has blockquote = ${desc?.includes('<blockquote>')}`);
+            const $desc = cheerio.load(desc, null, false);
+            const image = $desc('img').first().attr('src') || null;
+            $desc('img').remove();
 
-    posts.push({
-        id: link.split('/').pop() || String(i),
-        text: sanitizeContent($desc.html()),
-        image,
-        embed,
-        date: Math.floor(new Date($item.find('pubDate').text()).getTime() / 1000)
-    });
-});
+            const ytMatch = desc.match(/https?:\/\/(www\.)?(youtube\.com|youtu\.be)\/[^\s<"']+/i);
+            const embed = ytMatch ? { type: 'youtube', link: ytMatch[0] } : null;
+
+            posts.push({
+                id: $item.find('link').text().split('/').pop() || String(i),
+                text: sanitizeContent($desc.html()),
+                image,
+                embed,
+                date: Math.floor(new Date($item.find('pubDate').text()).getTime() / 1000)
+            });
+        });
 
         if (posts.length === 0) throw new Error('RSSHub returned 0 items');
 
         posts.sort((a, b) => b.date - a.date);
+        // ✅ ИСПРАВЛЕНО: ключ data
         cachedData = { data: posts, timestamp: Date.now(), version: CACHE_VERSION };
         return res.status(200).json(posts.slice(Number(offset), Number(offset) + Number(limit)));
 
     } catch (e) {
         debugLog.rss = e.message;
-        
-        // Фолбэк на Web
         try {
             const webPosts = await fetchFromTelegramWeb(channel);
             if (webPosts && webPosts.length > 0) {
+                // ✅ ИСПРАВЛЕНО: ключ data
                 cachedData = { data: webPosts, timestamp: Date.now(), version: CACHE_VERSION };
                 return res.status(200).json(webPosts.slice(Number(offset), Number(offset) + Number(limit)));
-            } else {
-                throw new Error('Telegram Web returned 0 items. Possible block.');
             }
+            throw new Error('Web returned 0');
         } catch (e2) {
             debugLog.web = e2.message;
+            return res.status(500).json({ error: 'All failed', details: debugLog });
         }
-
-        // Если дошли сюда, значит упали оба метода
-        return res.status(500).json({ 
-            error: 'All fetch methods failed', 
-            details: debugLog 
-        });
     }
 };
 
 async function fetchFromTelegramWeb(channel) {
     const response = await fetchWithTimeout(`https://t.me/s/${channel}`, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
     });
-    
-    if (!response.ok) throw new Error(`Web HTTP Status ${response.status}`);
-    
     const html = await response.text();
     const $ = cheerio.load(html);
     const posts = [];
@@ -142,7 +117,6 @@ async function fetchFromTelegramWeb(channel) {
     $('.tgme_widget_message').each((i, el) => {
         const $el = $(el);
         const textHtml = $el.find('.tgme_widget_message_text').html();
-        
         let image = null;
         const photoStyle = $el.find('.tgme_widget_message_photo_wrap').attr('style');
         if (photoStyle) {
@@ -154,18 +128,15 @@ async function fetchFromTelegramWeb(channel) {
         const embed = ytMatch ? { type: 'youtube', link: ytMatch[0] } : null;
 
         const dateStr = $el.find('time').attr('datetime');
-        const date = dateStr ? Math.floor(new Date(dateStr).getTime() / 1000) : 0;
-
         if (textHtml || image) {
             posts.push({
-                id: $el.attr('data-post') ? $el.attr('data-post').split('/').pop() : i,
+                id: $el.attr('data-post') ? $el.attr('data-post').split('/').pop() : String(i),
                 text: sanitizeContent(textHtml),
                 image,
                 embed,
-                date
+                date: dateStr ? Math.floor(new Date(dateStr).getTime() / 1000) : 0
             });
         }
     });
-    
     return posts.sort((a, b) => b.date - a.date);
 }

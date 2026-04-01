@@ -3,9 +3,14 @@ const cheerio = require('cheerio');
 
 const CACHE_TTL = 10 * 60 * 1000;
 const POSTS_LIMIT = 5;
-const CACHE_VERSION = 'v9';
+const CACHE_VERSION = 'v13';
 
-let cachedData = {  null, timestamp: 0, version: CACHE_VERSION };
+// 🔥 ИСПРАВЛЕНО: data: null вместо просто null
+let cachedData = {
+  data: null,
+  timestamp: 0,
+  version: CACHE_VERSION
+};
 
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -30,12 +35,11 @@ module.exports = async (req, res) => {
   }
 
   try {
-    // 🔥 Пробуем RSSHub сначала
     const posts = await fetchFromRSSHub(channel);
     
     if (!posts || posts.length === 0) {
-      console.log('⚠️ RSSHub вернул пусто, пробуем прямой парсинг');
-      return res.status(200).json([]); // Возвращаем пусто, а не падаем
+      console.log('⚠️ RSSHub вернул пусто');
+      return res.status(200).json([]);
     }
 
     cachedData = {  posts, timestamp: now, version: CACHE_VERSION };
@@ -44,7 +48,7 @@ module.exports = async (req, res) => {
   } catch (e) {
     console.error('❌ RSSHub ошибка:', e.message);
     
-    // 🔥 Фоллбэк: прямой парсинг t.me/s/
+    // Фоллбэк на прямой парсинг
     try {
       console.log('🔄 Пробуем прямой парсинг...');
       const posts = await fetchFromTelegramWeb(channel);
@@ -57,7 +61,6 @@ module.exports = async (req, res) => {
       console.error('❌ Прямой парсинг тоже упал:', e2.message);
     }
     
-    // Если всё упало — отдаём старый кэш
     if (cachedData.data) {
       console.warn('⚠️ Отдаю старый кэш');
       return res.status(200).json(cachedData.data.slice(offset, offset + limit));
@@ -67,7 +70,7 @@ module.exports = async (req, res) => {
   }
 };
 
-// ===== Функция 1: Парсинг через RSSHub =====
+// ===== Функция 1: Парсинг через RSSHub (с простой очисткой) =====
 async function fetchFromRSSHub(channel) {
   const rssUrl = `https://rsshub.app/telegram/channel/${channel}`;
   
@@ -80,7 +83,6 @@ async function fetchFromRSSHub(channel) {
   
   const rssText = await response.text();
   
-  // Проверка на XML
   if (!rssText.includes('<rss') && !rssText.includes('<feed')) {
     throw new Error('RSSHub вернул не XML');
   }
@@ -96,36 +98,27 @@ async function fetchFromRSSHub(channel) {
       const pubDate = $(el).find('pubDate').text();
       const guid = link.split('/').pop();
       
-      // 🔥 ПРОСТАЯ ОЧИСТКА: удаляем блок цитаты через строковые замены
+      // 🔥 ПРОСТАЯ ОЧИСТКА через строковые замены
       let cleanHtml = description;
       
-      // Удаляем весь блок .rsshub-quote с содержимым
-      cleanHtml = cleanHtml.replace(
-        /<div class="rsshub-quote">[\s\S]*?<\/div>/i, 
-        ''
-      );
+      // Удаляем блок с обрезанной цитатой
+      cleanHtml = cleanHtml.replace(/<div class="rsshub-quote">[\s\S]*?<\/div>/gi, '');
+      cleanHtml = cleanHtml.replace(/<blockquote>[\s\S]*?<\/blockquote>/gi, '');
       
-      // На всякий случай — ещё раз удаляем одиночные blockquote
-      cleanHtml = cleanHtml.replace(
-        /<blockquote>[\s\S]*?<\/blockquote>/i, 
-        ''
-      );
-      
-      // Чистим от лишних <p> обёрток в начале/конце
+      // Чистим от лишних обёрток
       cleanHtml = cleanHtml
         .replace(/^<p>/i, '').replace(/<\/p>$/i, '')
         .replace(/^\s*<br\s*\/?>\s*/i, '').replace(/\s*<br\s*\/?>\s*$/i, '')
         .trim();
       
-      // Если после чистки пусто — берём title
       const textHtml = cleanHtml || title;
       
-      // 🔍 Ищем картинку (обычно одна, в конце)
+      // Ищем картинку
       let image = null;
       const imgMatch = description.match(/<img[^>]+src="([^"]+)"/i);
       if (imgMatch) image = imgMatch[1];
       
-      // 🔍 Ищем YouTube для эмбеда (только если нет картинки)
+      // Ищем YouTube
       let embedData = null;
       if (!image) {
         const ytMatch = description.match(/https?:\/\/(www\.)?(youtube\.com|youtu\.be)\/[^\s<"]+/i);
@@ -137,22 +130,16 @@ async function fetchFromRSSHub(channel) {
       const date = pubDate ? Math.floor(new Date(pubDate).getTime() / 1000) : 0;
       
       if (textHtml || image || embedData) {
-        posts.push({ 
-          text: textHtml, 
-          image, 
-          embed: embedData, 
-          date, 
-          id: guid 
-        });
+        posts.push({ text: textHtml, image, embed: embedData, date, id: guid });
       }
     } catch (e) {
-      console.warn('⚠️ Ошибка парсинга одного поста:', e.message);
-      // Не ломаем весь ответ из-за одного поста
+      console.warn('⚠️ Ошибка парсинга поста:', e.message);
     }
   });
 
   return posts.sort((a, b) => b.date - a.date);
 }
+
 // ===== Функция 2: Прямой парсинг t.me/s/ (фоллбэк) =====
 async function fetchFromTelegramWeb(channel) {
   const response = await fetch(`https://t.me/s/${channel}`, {
@@ -206,7 +193,7 @@ async function fetchFromTelegramWeb(channel) {
         posts.push({ text: textHtml, image, embed: embedData, date, id: postId });
       }
     } catch (e) {
-      console.warn('⚠️ Ошибка парсинга одного поста (web):', e.message);
+      console.warn('⚠️ Ошибка парсинга поста (web):', e.message);
     }
   });
 

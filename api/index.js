@@ -52,24 +52,51 @@ module.exports = async (req, res) => {
         const posts = [];
 
         $('item').each((i, el) => {
-            const desc = $(el).find('description').text() || '';
-            const link = $(el).find('link').text() || '';
-            
-            const $desc = cheerio.load(desc, null, false);
-            const image = $desc('img').first().attr('src') || null;
-            $desc('img').remove();
+    const $item = $(el);
+    
+    // 🔥 ИСПРАВЛЕНИЕ: получаем description как HTML, а не как текст
+    const $descRaw = $item.find('description');
+    
+    // Способ 1: пробуем .html() (работает в большинстве случаев)
+    let desc = $descRaw.html();
+    
+    // Способ 2: если .html() вернул пусто — пробуем извлечь из CDATA
+    if (!desc || desc.length < 50) {
+        const descXml = $descRaw.toString();
+        const cdataMatch = descXml.match(/<!\[CDATA\[(.*?)\]\]>/s);
+        if (cdataMatch) {
+            desc = cdataMatch[1];
+        } else {
+            // Способ 3: экстренный — берём всё между тегами description
+            const fullMatch = descXml.match(/<description[^>]*>([\s\S]*?)<\/description>/i);
+            desc = fullMatch ? fullMatch[1] : '';
+        }
+    }
+    
+    const link = $item.find('link').text() || '';
+    
+    // Парсим описание как HTML-фрагмент (важно: без xmlMode!)
+    const $desc = cheerio.load(desc || '', { decodeEntities: true });
+    
+    // Извлекаем картинку ПЕРЕД удалением
+    const image = $desc('img').first().attr('src') || null;
+    $desc('img').remove(); // убираем из текста, чтобы не дублировалась
+    
+    // Ищем YouTube
+    const ytMatch = (desc || '').match(/https?:\/\/(www\.)?(youtube\.com|youtu\.be)\/[^\s<"']+/i);
+    const embed = ytMatch ? { type: 'youtube', link: ytMatch[0] } : null; // ← link, не url!
 
-            const ytMatch = desc.match(/https?:\/\/(www\.)?(youtube\.com|youtu\.be)\/[^\s<"']+/i);
-            const embed = ytMatch ? { type: 'youtube', link: ytMatch[0] } : null;
+    // Отладка (удалите потом)
+    // console.log(`Post ${i}: desc length = ${desc?.length}, has blockquote = ${desc?.includes('<blockquote>')}`);
 
-            posts.push({
-                id: link.split('/').pop() || i,
-                text: sanitizeContent($desc.html()),
-                image,
-                embed,
-                date: Math.floor(new Date($(el).find('pubDate').text()).getTime() / 1000)
-            });
-        });
+    posts.push({
+        id: link.split('/').pop() || String(i),
+        text: sanitizeContent($desc.html()),
+        image,
+        embed,
+        date: Math.floor(new Date($item.find('pubDate').text()).getTime() / 1000)
+    });
+});
 
         if (posts.length === 0) throw new Error('RSSHub returned 0 items');
 

@@ -4,7 +4,7 @@ const cheerio = require('cheerio');
 // --- НАСТРОЙКИ ---
 const CACHE_TTL = 10 * 60 * 1000; // 10 минут
 const POSTS_LIMIT = 5;
-const CACHE_VERSION = 'v4'; // Меняйте при обновлениях структуры
+const CACHE_VERSION = 'v5'; // 🔁 Изменил версию (сбросит кэш)
 // -----------------
 
 let cachedData = {
@@ -67,7 +67,7 @@ module.exports = async (req, res) => {
       // Текст с HTML-форматированием
       const textHtml = $(el).find('.tgme_widget_message_text').html() || '';
       
-      // Картинки
+      // 1. Сначала ищем КАРТИНКУ
       const imageStyle = $(el).find('.tgme_widget_message_photo_wrap').attr('style');
       let image = null;
       if (imageStyle) {
@@ -75,71 +75,73 @@ module.exports = async (req, res) => {
         if (match) image = match[1];
       }
 
-      // Эмбеды (YouTube, ссылки, видео)
+      // 2. Эмбеды ищем ТОЛЬКО если нет картинки
       let embedData = null;
       
-      // Способ 1: Ищем блок embed
-      const embedBlocks = $(el).find('.tgme_widget_message_embed');
-      embedBlocks.each((j, embedEl) => {
-        const $embed = $(embedEl);
-        const link = $embed.find('a').first().attr('href');
-        const title = $embed.find('.tgme_widget_message_embed_title').text().trim();
-        
-        // Ищем картинку превью
-        let embedImg = null;
-        const photoWrap = $embed.find('.tgme_widget_message_embed_photo');
-        const photoStyle = photoWrap.attr('style');
-        if (photoStyle) {
-          const imgMatch = photoStyle.match(/url\('(.+?)'\)/);
-          if (imgMatch) embedImg = imgMatch[1];
-        }
-        
-        // Проверяем, YouTube ли это
-        if (link && (link.includes('youtube.com') || link.includes('youtu.be'))) {
-          embedData = {
-            type: 'youtube',
-            link: link,
-            title: title || 'YouTube Video',
-            image: embedImg
-          };
-        } else if (link && !embedData) {
-          // Другие ссылки (превью)
-          embedData = {
-            type: 'link',
-            link: link,
-            title: title,
-            image: embedImg
-          };
-        }
-      });
-      
-      // Способ 2: Ищем видео (если не нашли embed)
-      if (!embedData) {
-        const videoWrap = $(el).find('.tgme_widget_message_video_wrap, .tgme_widget_message_roundvideo_wrap');
-        if (videoWrap.length > 0) {
-          const video = videoWrap.find('video');
-          const poster = video.attr('poster');
-          const videoSrc = video.attr('src');
+      if (!image) {
+        // Способ 1: Ищем блок embed (превью ссылок, YouTube)
+        const embedBlocks = $(el).find('.tgme_widget_message_embed');
+        embedBlocks.each((j, embedEl) => {
+          const $embed = $(embedEl);
+          const link = $embed.find('a').first().attr('href');
+          const title = $embed.find('.tgme_widget_message_embed_title').text().trim();
           
-          embedData = {
-            type: 'video',
-            link: videoSrc || null,
-            title: 'Видео',
-            image: poster
-          };
+          // Ищем картинку превью
+          let embedImg = null;
+          const photoWrap = $embed.find('.tgme_widget_message_embed_photo');
+          const photoStyle = photoWrap.attr('style');
+          if (photoStyle) {
+            const imgMatch = photoStyle.match(/url\('(.+?)'\)/);
+            if (imgMatch) embedImg = imgMatch[1];
+          }
+          
+          // Проверяем, YouTube ли это
+          if (link && (link.includes('youtube.com') || link.includes('youtu.be'))) {
+            embedData = {
+              type: 'youtube',
+              link: link,
+              title: title || 'YouTube Video',
+              image: embedImg
+            };
+          } else if (link && !embedData) {
+            // Другие ссылки (превью)
+            embedData = {
+              type: 'link',
+              link: link,
+              title: title,
+              image: embedImg
+            };
+          }
+        });
+        
+        // Способ 2: Ищем видео (если не нашли embed)
+        if (!embedData) {
+          const videoWrap = $(el).find('.tgme_widget_message_video_wrap, .tgme_widget_message_roundvideo_wrap');
+          if (videoWrap.length > 0) {
+            const video = videoWrap.find('video');
+            const poster = video.attr('poster');
+            const videoSrc = video.attr('src');
+            
+            embedData = {
+              type: 'video',
+              link: videoSrc || null,
+              title: 'Видео',
+              image: poster
+            };
+          }
         }
-      }
-      
-      // Способ 3: Ищем ссылки на YouTube прямо в тексте
-      if (!embedData && textHtml) {
-        const youtubeMatch = textHtml.match(/https?:\/\/(www\.)?(youtube\.com|youtu\.be)\/[^\s<"]+/);
-        if (youtubeMatch) {
-          embedData = {
-            type: 'youtube',
-            link: youtubeMatch[0],
-            title: 'YouTube',
-            image: null
-          };
+        
+        // Способ 3: Ищем ссылки на YouTube прямо в тексте
+        if (!embedData && textHtml) {
+          const youtubeMatch = textHtml.match(/https?:\/\/(www\.)?(youtube\.com|youtu\.be)\/[^\s<"]+/);
+          if (youtubeMatch) {
+            embedData = {
+              type: 'youtube',
+              link: youtubeMatch[0],
+              title: 'YouTube',
+              image: null
+            };
+          }
         }
       }
 

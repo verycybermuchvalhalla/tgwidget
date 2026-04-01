@@ -51,7 +51,7 @@ module.exports = async (req, res) => {
     let debugLog = { rss: null, web: null };
 
     try {
-        const rssUrl = `https://rsshub.app/telegram/channel/${channel}?fulltext=1`;
+        const rssUrl = `https://rsshub.rssforever.com/telegram/channel/${channel}?fulltext=1`;
         const response = await fetchWithTimeout(rssUrl, { 
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' } 
         });

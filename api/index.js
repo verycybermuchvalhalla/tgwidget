@@ -3,20 +3,27 @@ const cheerio = require('cheerio');
 
 const CACHE_TTL = 10 * 60 * 1000; 
 const POSTS_LIMIT = 5;
-const CACHE_VERSION = 'v32'; 
+const CACHE_VERSION = 'v33'; 
 
-// ✅ ИСПРАВЛЕНО: Добавлен ключ "data"
 let cachedData = { data: null, timestamp: 0, version: CACHE_VERSION };
 
+/**
+ * Очистка текста от мусора RSSHub и лишних оберток
+ */
 function sanitizeContent(html) {
     if (!html) return '';
-    // Используем xmlMode: false для корректного рендеринга HTML фрагмента
+    // fragment: true (или null, false в новых версиях) убирает <html><body>
     const $ = cheerio.load(html, null, false);
     
+    // Удаляем цитаты ("загогулины") и служебную инфу
     $('.rsshub-quote, blockquote, .tgme_widget_message_author_name, .tgme_widget_message_forwarded_from').remove();
+    
+    // Удаляем пустые ссылки
     $('a:empty').remove();
 
-    return $.html().trim().replace(/^(?:\s*<br\s*\/?>\s*)+|(?:\s*<br\s*\/?>\s*)+$/gi, '');
+    let result = $.html().trim();
+    // Убираем лишние брейки в начале и конце
+    return result.replace(/^(?:\s*<br\s*\/?>\s*)+|(?:\s*<br\s*\/?>\s*)+$/gi, '');
 }
 
 async function fetchWithTimeout(url, options = {}) {
@@ -39,7 +46,6 @@ module.exports = async (req, res) => {
     const { channel, limit = POSTS_LIMIT, offset = 0 } = req.query;
     if (!channel) return res.status(400).json({ error: 'No channel provided' });
 
-    // ✅ ИСПРАВЛЕНО: Правильный сброс объекта
     if (cachedData.version !== CACHE_VERSION) {
         cachedData = { data: null, timestamp: 0, version: CACHE_VERSION };
     }
@@ -51,7 +57,8 @@ module.exports = async (req, res) => {
     let debugLog = { rss: null, web: null };
 
     try {
-        const rssUrl = `https://rsshub.rssforever.com/telegram/channel/${channel}?fulltext=1`;
+        // Используем альтернативное зеркало или основное с fulltext=1
+        const rssUrl = `https://rsshub.app/telegram/channel/${channel}?fulltext=1`;
         const response = await fetchWithTimeout(rssUrl, { 
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' } 
         });
@@ -72,20 +79,17 @@ module.exports = async (req, res) => {
             const ytMatch = desc.match(/https?:\/\/(www\.)?(youtube\.com|youtu\.be)\/[^\s<"']+/i);
             const embed = ytMatch ? { type: 'youtube', link: ytMatch[0] } : null;
 
-            // 2. Улучшенный поиск основной картинки
+            // 2. Ищем картинку, ИГНОРИРУЯ обложки YouTube
             let image = null;
-            const images = $desc('img');
-            
-            images.each((idx, img) => {
+            $desc('img').each((idx, img) => {
                 const src = $(img).attr('src');
-                // Пропускаем картинки, которые являются превьюшками YouTube или мелкими иконками
                 if (src && !src.includes('ytimg.com') && !src.includes('youtube.com')) {
                     image = src;
-                    return false; // Нашли нормальное фото, выходим из цикла
+                    return false; // Нашли картинку поста, выходим из цикла
                 }
             });
 
-            // 3. Чистим ВСЕ картинки из текста, чтобы они не мешались
+            // 3. Удаляем все теги img из текста поста
             $desc('img').remove();
 
             const link = $item.find('link').text() || '';
@@ -98,12 +102,10 @@ module.exports = async (req, res) => {
                 date: Math.floor(new Date($item.find('pubDate').text()).getTime() / 1000)
             });
         });
-        });
 
         if (posts.length === 0) throw new Error('RSSHub returned 0 items');
 
         posts.sort((a, b) => b.date - a.date);
-        // ✅ ИСПРАВЛЕНО: ключ data
         cachedData = { data: posts, timestamp: Date.now(), version: CACHE_VERSION };
         return res.status(200).json(posts.slice(Number(offset), Number(offset) + Number(limit)));
 
@@ -112,7 +114,6 @@ module.exports = async (req, res) => {
         try {
             const webPosts = await fetchFromTelegramWeb(channel);
             if (webPosts && webPosts.length > 0) {
-                // ✅ ИСПРАВЛЕНО: ключ data
                 cachedData = { data: webPosts, timestamp: Date.now(), version: CACHE_VERSION };
                 return res.status(200).json(webPosts.slice(Number(offset), Number(offset) + Number(limit)));
             }
@@ -135,6 +136,7 @@ async function fetchFromTelegramWeb(channel) {
     $('.tgme_widget_message').each((i, el) => {
         const $el = $(el);
         const textHtml = $el.find('.tgme_widget_message_text').html();
+        
         let image = null;
         const photoStyle = $el.find('.tgme_widget_message_photo_wrap').attr('style');
         if (photoStyle) {

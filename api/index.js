@@ -96,28 +96,31 @@ async function fetchFromRSSHub(channel) {
       const pubDate = $(el).find('pubDate').text();
       const guid = link.split('/').pop();
       
-      // 🔥 ВАЖНО: правильно очищаем description от обрезанной цитаты
-      // Создаём новый cheerio-инстанс для парсинга HTML внутри description
-      const $desc = cheerio.load(description, { xmlMode: false });
+      // 🔥 ПРОСТАЯ ОЧИСТКА: удаляем блок цитаты через строковые замены
+      let cleanHtml = description;
       
-      // 1. Удаляем блок с обрезанной цитатой (он всегда в начале)
-      $desc('.rsshub-quote').remove();
-      $desc('blockquote').remove();
+      // Удаляем весь блок .rsshub-quote с содержимым
+      cleanHtml = cleanHtml.replace(
+        /<div class="rsshub-quote">[\s\S]*?<\/div>/i, 
+        ''
+      );
       
-      // 2. Получаем ОСТАВШИЙСЯ контент
-      // Берём всё, что осталось в body
-      let cleanHtml = $desc('body').html() || $desc.root().html() || description;
+      // На всякий случай — ещё раз удаляем одиночные blockquote
+      cleanHtml = cleanHtml.replace(
+        /<blockquote>[\s\S]*?<\/blockquote>/i, 
+        ''
+      );
       
-      // 3. Чистим от лишних обёрток
+      // Чистим от лишних <p> обёрток в начале/конце
       cleanHtml = cleanHtml
         .replace(/^<p>/i, '').replace(/<\/p>$/i, '')
         .replace(/^\s*<br\s*\/?>\s*/i, '').replace(/\s*<br\s*\/?>\s*$/i, '')
         .trim();
       
-      // Если после чистки пусто — берем title
+      // Если после чистки пусто — берём title
       const textHtml = cleanHtml || title;
       
-      // 🔍 Ищем картинку в description (она обычно в конце)
+      // 🔍 Ищем картинку (обычно одна, в конце)
       let image = null;
       const imgMatch = description.match(/<img[^>]+src="([^"]+)"/i);
       if (imgMatch) image = imgMatch[1];
@@ -135,7 +138,7 @@ async function fetchFromRSSHub(channel) {
       
       if (textHtml || image || embedData) {
         posts.push({ 
-          text: textHtml,  // ✅ Теперь здесь ПОЛНЫЙ текст!
+          text: textHtml, 
           image, 
           embed: embedData, 
           date, 
@@ -143,7 +146,8 @@ async function fetchFromRSSHub(channel) {
         });
       }
     } catch (e) {
-      console.warn('⚠️ Ошибка парсинга поста:', e.message);
+      console.warn('⚠️ Ошибка парсинга одного поста:', e.message);
+      // Не ломаем весь ответ из-за одного поста
     }
   });
 

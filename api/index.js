@@ -42,7 +42,7 @@ module.exports = async (req, res) => {
 
     try {
         // Пробуем официальный RSSHub с fulltext
-        const rssUrl = `https://rsshub.rssforever.com/telegram/channel/${channel}?fulltext=1`;
+        const rssUrl = `https://rsshub.app/telegram/channel/${channel}?fulltext=1`;
         const response = await fetchWithTimeout(rssUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
         const text = await response.text();
         const $ = cheerio.load(text, { xmlMode: true });

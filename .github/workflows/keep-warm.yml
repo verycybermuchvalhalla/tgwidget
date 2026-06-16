@@ -1,0 +1,13 @@
+name: keep-feed-warm
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"  # Расписание: каждые 5 минут
+  workflow_dispatch:       # Эта строчка добавляет кнопку "Запустить вручную" для теста
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      # 👇 НИЖЕ ВСТАВЬТЕ СЮДА СВОЮ ССЫЛКУ ИЗ ШАГА 1 👇
+      - run: curl -s -o /dev/null -w "%{http_code} %{time_total}s\n" "https://tgwidget.vercel.app/api?channel=Cybervalhalla"

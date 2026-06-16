@@ -4,14 +4,6 @@
     { "src": "api/index.js", "use": "@vercel/node" }
   ],
   "routes": [
-    { 
-      "src": "/api/(.*)", 
-      "dest": "/api/index.js",
-      "headers": {
-        "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
-        "Pragma": "no-cache",
-        "Expires": "0"
-      }
-    }
+    { "src": "/api/(.*)", "dest": "/api/index.js" }
   ]
 }
